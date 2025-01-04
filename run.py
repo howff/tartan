@@ -1,21 +1,39 @@
 #!/usr/bin/env python3
 
+import argparse
 import torch
 import torchvision
 from torchvision import datasets, models, transforms
+from torchvision.transforms import v2
 import torch.nn as nn
 from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, KLDivLoss, MSELoss
-import torch.nn.functional as F
+from torch.nn import functional
 from torch.optim import lr_scheduler
 from tqdm import tqdm
 import sys
+from PIL import Image
 
 
 traindir = "training"
 testdir = "validation"
 
-save_model_path = 'tartan.pt'
-load_model_path = save_model_path
+
+save_model_path = None # 'tartan.pt'
+load_model_path = None # save_model_path
+
+model = None
+
+
+parser = argparse.ArgumentParser(description='Tartan Identifier')
+parser.add_argument('-v', '--verbose', action="store_true", help='verbose')
+parser.add_argument('-r', dest='read', action="store", help='filename of model weights to read')
+parser.add_argument('-w', dest='write', action="store", help='filename of model weights to write after training')
+args = parser.parse_args()
+
+if args.read:
+  load_model_path = args.read
+if args.write:
+  save_model_path = args.write
 
 
 #transformations
@@ -40,10 +58,11 @@ base_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225],),
 ])
 augment_transform = transforms.Compose([
-    transforms.RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.8, 1.2), shear=10),
+    transforms.RandomAffine(degrees=40, translate=(0.1, 0.1), scale=(0.8, 1.2), shear=10),
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-    transforms.RandomRotation(degrees=15),
+    transforms.RandomRotation(degrees=45),
+    v2.ElasticTransform(),
     #transforms.RandomCrop(224, padding=4),  # Random cropping, or Resize:
     transforms.Resize((224,224)),
     transforms.ToTensor(),
@@ -141,10 +160,8 @@ class AugmentedImageFolder(torch.utils.data.Dataset):
 
 # ---------------------------------------------------------------------
 #datasets
-#train_data = datasets.ImageFolder(traindir,transform=train_transforms)
-train_data = AugmentedImageFolder(traindir,transform=train_transforms)
-#test_data = datasets.ImageFolder(testdir,transform=test_transforms)
-test_data = AugmentedImageFolder(testdir,transform=test_transforms)
+train_data = AugmentedImageFolder(traindir)
+test_data = AugmentedImageFolder(testdir)
 
 class_names = list(train_data.class_to_idx.keys())
 print(class_names)
@@ -182,42 +199,49 @@ def make_train_step(model, optimizer, loss_fn):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print('Running on %s' % device)
 
-model = models.resnet18(weights='DEFAULT') # same as weights='IMAGENET1K_V1' or ResNet18_Weights.DEFAULT, was (pretrained=True)
 
-#freeze all params
-for params in model.parameters():
-  params.requires_grad_ = False
+def define_model(load_model_path : str = None):
+  model = models.resnet18(weights='DEFAULT') # same as weights='IMAGENET1K_V1' or ResNet18_Weights.DEFAULT, was (pretrained=True)
 
-#add a new final layer
-nr_filters = model.fc.in_features  #number of input features of last layer
-model.fc = nn.Linear(nr_filters, num_classes)
+  #freeze all params
+  for params in model.parameters():
+    params.requires_grad_ = False
 
-if load_model_path:
+  #add a new final layer
+  nr_filters = model.fc.in_features  #number of input features of last layer
+  model.fc = nn.Linear(nr_filters, num_classes)
+
+  model = model.to(device)
+  return model
+
+
+def load_model_weights(model, load_model_path):
   print('Loading model weights from %s' % load_model_path)
   path_loader = torch.load(load_model_path)
   model.load_state_dict(path_loader)
   model.eval()
 
-model = model.to(device)
+  model = model.to(device)
+  return model
 
 
 
 
-#loss
-#loss_fn = BCEWithLogitsLoss() #binary cross entropy with sigmoid, so no need to use sigmoid in the model
-loss_fn = CrossEntropyLoss()
-#loss_fn = KLDivLoss()
-#loss_fn = MSELoss()
-
-#optimizer
-optimizer = torch.optim.Adam(model.fc.parameters())
-
-#train step
-train_step = make_train_step(model, optimizer, loss_fn)
 
 
+def train_model(model, save_model_path : str = None):
 
-def train():
+  #loss
+  #loss_fn = BCEWithLogitsLoss() #binary cross entropy with sigmoid, so no need to use sigmoid in the model
+  loss_fn = CrossEntropyLoss()
+  #loss_fn = KLDivLoss()
+  #loss_fn = MSELoss()
+
+  #optimizer
+  optimizer = torch.optim.Adam(model.fc.parameters())
+
+  #train step
+  train_step = make_train_step(model, optimizer, loss_fn)
 
 
   losses = []
@@ -292,28 +316,19 @@ def train():
 
 
 
-def inference(test_data):
-  idx = torch.randint(1, len(test_data), (1,))
-  sample = torch.unsqueeze(test_data[idx][0], dim=0).to(device)
-  actual_class = test_data[idx][1]
-
+def inference(model, image_data):
   # binary classification uses sigmod, multiple classification uses softmax
-  #if torch.sigmoid(model(sample)) < 0.5:
-  #  print("Prediction : Cat")
-  #else:
-  #  print("Prediction : Dog")
-
-  # Assuming `model` is your pre-trained model and `input_image` is the image to classify
-  logits = model(sample)  # Output of the model (raw logits)
+  #if torch.sigmoid(model(image_data)) < 0.5:
+  logits = model(image_data)  # Output of the model (raw logits)
   #print('logits = %s' % logits)
   #for nn in range(num_classes):
     #print('logits %d = %s' % (nn, logits[nn]))
     ##print('logits %d item = %s' % (nn, logits[nn].item()))
 
   # Apply softmax to get probabilities
-  probabilities = F.softmax(logits, dim=1)
+  probabilities = functional.softmax(logits, dim=1)
   torch.set_printoptions(profile="full")
-  #print('probabilities = %s' % probabilities)
+  print('probabilities = %s' % probabilities)
   #print('probabilities = %s' % probabilities.item())
   #for nn in range(5):
     #print(probabilities[nn])
@@ -323,20 +338,38 @@ def inference(test_data):
   # max() gets max value, argmax() gets index of max probability
   predicted_class = torch.argmax(probabilities, dim=1).item()
   predicted_label = class_names[predicted_class]  # Convert the tensor to a Python number
-  print('test on idx %d = class %d file %s' % (idx, actual_class, test_data.imgs[idx][0]))
-  print('predicted class = %s' % predicted_class)
-  print('predicted label = %s' % predicted_label)
-  if predicted_class == actual_class:
-    return True
-  return False
+  print('predicted class = %s label = %s' % (predicted_class, predicted_label))
+  return predicted_class
+
+def inference_from_file(model, test_file, test_class : int = None):
+  print('Loading %s' % test_file)
+  test_image = Image.open(test_file).convert('RGB')
+  test_image = base_transform(test_image).unsqueeze(0).to(device)
+  predicted_class = inference(model, test_image)
+  print('test on %s = class %d (given %s)' % (test_file, predicted_class, test_class))
+  return (predicted_class == test_class)
+
+def inference_from_imagefolder(model, test_data):
+  idx = torch.randint(1, len(test_data), (1,))
+  test_filename = test_data.imgs[idx][0]
+  test_data, test_class = test_data[idx]
+  print('test on idx %d = class %d file %s' % (idx, test_class, test_filename))
+  test_image = torch.unsqueeze(test_data, dim=0).to(device)
+  return (inference(model, test_image) == test_class)
 
 
-if not load_model_path:
-  train()
+model = define_model()
 
-correct=0
-for nnn in range(30):
-  if inference(test_data):
-    correct += 1
-print('accuracy = %f%%' % (100.0*correct/30))
-#print(test_data.imgs)
+if load_model_path:
+  model = load_model_weights(model, load_model_path)
+else:
+  train_model(model, save_model_path)
+
+if len(sys.argv) > 1:
+  inference_from_file(model, sys.argv[1])
+else:
+  correct=0
+  for nnn in range(30):
+   if inference_from_imagefolder(model, test_data):
+      correct += 1
+  print('accuracy = %.2f%%' % (100.0*correct/30))

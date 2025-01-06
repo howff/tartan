@@ -22,14 +22,20 @@ save_model_path = None # 'tartan.pt'
 load_model_path = None # save_model_path
 
 model = None
+debug = False
+verbose = False
 
 
 parser = argparse.ArgumentParser(description='Tartan Identifier')
 parser.add_argument('-v', '--verbose', action="store_true", help='verbose')
 parser.add_argument('-r', dest='read', action="store", help='filename of model weights to read')
 parser.add_argument('-w', dest='write', action="store", help='filename of model weights to write after training')
+parser.add_argument('-i', dest='infiles', nargs='*', default=[]) # can use: -i *.jpg
+
 args = parser.parse_args()
 
+if args.verbose:
+    verbose = True
 if args.read:
   load_model_path = args.read
 if args.write:
@@ -295,8 +301,9 @@ def train_model(model, save_model_path : str = None):
       #save best model
       if cum_loss <= best_loss:
         best_model_wts = model.state_dict()
-      #print('EARLY BREAK')
-      #break # XXX
+        if save_model_path:
+          print('Saving best model weights so far to %s' % save_model_path)
+          torch.save(model.state_dict(), save_model_path)
 
       #early stopping
       early_stopping_counter = 0
@@ -311,7 +318,7 @@ def train_model(model, save_model_path : str = None):
   model.load_state_dict(best_model_wts)
 
   if save_model_path:
-    print('Saving model weights to %s' % save_model_path)
+    print('Saving final model weights to %s' % save_model_path)
     torch.save(model.state_dict(), save_model_path)
 
 
@@ -328,7 +335,7 @@ def inference(model, image_data):
   # Apply softmax to get probabilities
   probabilities = functional.softmax(logits, dim=1)
   torch.set_printoptions(profile="full")
-  print('probabilities = %s' % probabilities)
+  if verbose: print('probabilities = %s' % probabilities)
   #print('probabilities = %s' % probabilities.item())
   #for nn in range(5):
     #print(probabilities[nn])
@@ -365,8 +372,9 @@ if load_model_path:
 else:
   train_model(model, save_model_path)
 
-if len(sys.argv) > 1:
-  inference_from_file(model, sys.argv[1])
+if args.infiles:
+  for filename in args.infiles:
+    inference_from_file(model, filename)
 else:
   correct=0
   for nnn in range(30):
